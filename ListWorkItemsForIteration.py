@@ -10,11 +10,13 @@ from azure.devops.v5_1.work_item_tracking import \
     models as workItemTrackingModels
 from msrest.authentication import BasicAuthentication
 from openpyxl import Workbook
+from openpyxl import load_workbook
 
 # DevOps personal access token (recycle every 30 days) 
 personal_access_token = 'PAT'
 # DevOps Organization URL
 organization_url = 'https://dev.azure.com/YOUR-ORG'
+
 
 usa_cst = pytz.timezone('US/Central')
 today_timezone = usa_cst.localize(datetime.now())
@@ -71,17 +73,17 @@ class experiment:
 
 work_item_type_of_interest = ["Product Backlog Item", "Task"]
 
-wiql_template = "\
+pbi_wiql_template = "\
     Select [System.Id] From WorkItems \
     Where [System.AreaPath] = 'CNP.GIS' \
-        and [System.WorkItemType] in ('Product Backlog Item', 'Task') \
+        and [System.WorkItemType] in ('Product Backlog Item') \
         and [System.State] <> 'Removed' \
-        and [System.IterationPath] = '#IterationPath#' \
+        and [System.IterationPath] = '{IterationPath}' \
     Order by [Microsoft.VSTS.Common.Priority] asc, [System.CreatedDate] desc\
 "
 
 field_names = ['System.Id', 'System.WorkItemType', 'System.Parent', 
-    'System.Title', 'System.Description', 'System.Tags', 
+    'System.Title', 'System.Tags', # 'System.Description',
     'Microsoft.VSTS.Common.ValueArea', 'Microsoft.VSTS.Common.BusinessValue', 
     'System.AssignedTo', 'System.State', 'System.CreatedDate', 'System.ChangedDate',
     'System.AreaPath', 'System.IterationPath']
@@ -148,12 +150,46 @@ def get_iteration(team_context, iteration_path):
     return iteration_path, iteration_due_date
 
 
+def get_past_iterations(team_context): 
+
+    work_client = connection.clients.get_work_client()
+
+    iteration_list = []
+
+    # get the iteration paths
+    index = 0 
+    get_team_iterations_response = work_client.get_team_iterations(team_context)
+    if get_team_iterations_response is not None: 
+        for team_iteration in get_team_iterations_response: 
+            start_date = team_iteration.attributes.start_date
+            if start_date.year < 2021 or start_date > today_timezone: 
+                # skip the iterations of last year and the future
+                continue
+            else:
+                iteration_path = team_iteration.path
+                iteration_due_date = team_iteration.attributes.finish_date                 
+                print("Iteration [{0}]: {1}, {2} ({3} -> {4})".format(
+                    index, team_iteration.name, team_iteration.path, 
+                    team_iteration.attributes.start_date.strftime("%Y-%m-%d"),
+                    team_iteration.attributes.finish_date.strftime("%Y-%m-%d")
+                    ))
+                iteration_list.append({
+                    'iteration_path': iteration_path, 
+                    'iteration_due_date': iteration_due_date
+                })
+                index += 1
+        # All team iterations have been retrieved
+        get_team_iterations_response = None
+
+    return iteration_list
+
+
 def retrieve_work_items(team_context, iteration_path):
 
     # query the backlogs 
     work_tracking_client = connection.clients.get_work_item_tracking_client()
 
-    wiql = workItemTrackingModels.Wiql(query= wiql_template.replace("#IterationPath#", iteration_path))
+    wiql = workItemTrackingModels.Wiql(query= pbi_wiql_template.replace("{IterationPath}", iteration_path))
 
     query_by_wiql_response = work_tracking_client.query_by_wiql(wiql, team_context)
 
@@ -214,12 +250,14 @@ def retrieve_work_items(team_context, iteration_path):
         return work_item_list
 
 
-def write_to_excel(work_item_list, file_path, iteration_due_date):
+def compose_item_url(team_context, item_id): 
+    item_url_template = "{ORG_URL}/{PROJECT}/_backlogs/backlog/{TEAM}/Backlog items/?workitem={ID}"
+    return item_url_template.replace("{ORG_URL}", organization_url).replace("{PROJECT}", team_context.project).replace("{TEAM}", team_context.team).replace("{ID}", str(item_id))
 
+
+def write_to_workbook(work_item_list, worksheet, iteration_due_date, append_only): 
     # prepare the excel file 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "current_iteration"
+    ws = worksheet
 
     export_field_names = copy.deepcopy(field_names)
     export_field_names.append('Excel.Operation') 
@@ -229,53 +267,81 @@ def write_to_excel(work_item_list, file_path, iteration_due_date):
     export_field_names.append('Excel.Planned')
     export_field_excel_planned_index = len(export_field_names)
 
-    export_field_names.append('Export.DueDate')
+    export_field_names.append('Excel.ItemUrl') # Item URL to DevOps
+    export_field_excel_itemUrl_index = len(export_field_names)
+
+    export_field_names.append('Export.Timestamp') # Export.DueDate
     export_field_export_timestamp_index = len(export_field_names)
     if isinstance(iteration_due_date, datetime): 
         export_timestamp = iteration_due_date.strftime("%Y-%m-%d")
 
-    # write the headers to the workbook
-    for f in range(len(export_field_names)): 
-        simple_name = export_field_names[f].split('.')[-1]
-        ws.cell(row=1, column=f+1, value=simple_name)
+    start_row = 0
+    if append_only == False:
+        # write the headers to the workbook
+        for f in range(len(export_field_names)): 
+            simple_name = export_field_names[f].split('.')[-1]
+            ws.cell(row=1, column=f+1, value=simple_name)
+        start_row = 2
+    else:
+        start_row = ws.max_row + 1
 
     # write data to the workbook 
-    for r in range(len(work_item_list)): 
-        work_item = work_item_list[r]
+    for i in range(len(work_item_list)): 
+        work_item = work_item_list[i]
+        r = i + start_row
         for f in range(len(export_field_names)):
             field_name = export_field_names[f] 
             field_value = ''
-            if field_name == 'Export.DueDate':
-                ws.cell(row=r+2, column=export_field_export_timestamp_index, value=export_timestamp)
+            if field_name == 'Export.Timestamp':
+                ws.cell(row=r, column=export_field_export_timestamp_index, value=export_timestamp)
             elif field_name in work_item.fields.keys():
                 fc = export_field_names.index(field_name)
                 # set the cell value
                 field_value = work_item.fields[field_name]
                 # further process the cell value
+                if field_name == 'System.Id': 
+                    ws.cell(row=r, column=export_field_excel_itemUrl_index, value=compose_item_url(team_context, field_value))
                 if field_name == 'System.Tags': 
                     field_value = field_value.upper()
                     # parse the tags for operation
                     if field_value.find('ELECTRIC') > -1: 
-                        ws.cell(row=r+2, column=export_field_excel_operation_index, value='Eletric')
+                        ws.cell(row=r, column=export_field_excel_operation_index, value='Eletric')
                     elif field_value.find('GAS') > -1: 
-                        ws.cell(row=r+2, column=export_field_excel_operation_index, value='Gas')
+                        ws.cell(row=r, column=export_field_excel_operation_index, value='Gas')
                     else: # count as both 
-                        ws.cell(row=r+2, column=export_field_excel_operation_index, value='Both')
+                        ws.cell(row=r, column=export_field_excel_operation_index, value='Both')
                     # parse the tags for region
                     if field_value.find('INOH') > -1: 
-                        ws.cell(row=r+2, column=export_field_excel_region_index, value='INOH')
+                        ws.cell(row=r, column=export_field_excel_region_index, value='INOH')
                     # parse the tags for Planned or Unplanned 
                     if field_value.find('UNPLANNED') > -1: 
-                        ws.cell(row=r+2, column=export_field_excel_planned_index, value='Unplanned')
+                        ws.cell(row=r, column=export_field_excel_planned_index, value='Unplanned')
                     else: 
-                        ws.cell(row=r+2, column=export_field_excel_planned_index, value='Planned')
+                        ws.cell(row=r, column=export_field_excel_planned_index, value='Planned')
                 if field_name == 'System.AssignedTo': 
                     # simplify the AssignedTo object 
                     field_value = work_item.fields["System.AssignedTo"]['displayName']
-                ws.cell(row=r+2, column=fc+1, value=field_value)
+                ws.cell(row=r, column=fc+1, value=field_value)
+
+    return ws
+
+
+def write_to_excel(work_item_list, file_path, iteration_due_date, append_only=False):
+    ws = None
+    if append_only == True:
+        # load the excel file
+        wb = load_workbook(file_path)
+    else: 
+        # prepare the excel file 
+        wb = Workbook()
+    # get the active sheet
+    ws = wb.active
+    ws.title = "current_iteration"
+
+    write_to_workbook(work_item_list, ws, iteration_due_date, append_only)
 
     # save to a given file
-    wb.save(file_path)
+    wb.save(file_path)    
 
 
 if __name__ == "__main__": 
@@ -292,28 +358,47 @@ if __name__ == "__main__":
     # set the team context 
     team_context = workModels.TeamContext(project=args.project, team=args.team)
 
-    iteration_path = None
-    iteration_due_date = None
+    iteration_list = []
+    file_name = None
+    append_only = False
 
     if args.iteration is None: 
         print("****** Getting the current iteration ...")
         iteration_path, iteration_due_date = get_current_iteration(team_context)
+        iteration_list.append({
+            'iteration_path': iteration_path, 
+            'iteration_due_date': iteration_due_date
+        })
+    elif args.iteration == 'ALL': 
+        iteration_list = get_past_iterations(team_context)
+        file_name = 'CNP.GIS_2021_Sprint_Combined.xlsx'
     else: 
-
         iteration_path, iteration_due_date = get_iteration(team_context, args.iteration)
-        
-    print("****** Retrieving work items for {0} ....".format(iteration_path))
-    work_item_list = retrieve_work_items(team_context, iteration_path)
+        iteration_list.append({
+            'iteration_path': iteration_path, 
+            'iteration_due_date': iteration_due_date
+        })
 
-    local_folder = os.getcwd()
-    file_name = iteration_path.replace('\\', '_') + ".xlsx"
-    file_path = os.path.join(os.path.join(local_folder, r"iterations"), file_name)
-    if os.path.exists(file_path):
-        raise Exception("File ({0}) already exists.".format(file_path))
+    for i in iteration_list: 
+        iteration_path = i['iteration_path']
+        iteration_due_date = i['iteration_due_date']
 
-    print("****** Storing work items to an Excel file {0} ....".format(file_path)) 
-    if iteration_due_date is None:
-        iteration_due_date = datetime.now()
-    write_to_excel(work_item_list, file_path, iteration_due_date)
+        print("****** Retrieving work items for {0} ....".format(iteration_path))
+        work_item_list = retrieve_work_items(team_context, iteration_path)
+
+        local_folder = os.getcwd()
+        if file_name is None: 
+            file_name = iteration_path.replace('\\', '_') + ".xlsx"
+        file_path = os.path.join(os.path.join(local_folder, r"iterations"), file_name)
+
+        if append_only == False and os.path.exists(file_path):
+            raise Exception("File ({0}) already exists.".format(file_path))
+
+        print("****** Storing work items to an Excel file {0} ....".format(file_path)) 
+        if iteration_due_date is None:
+            iteration_due_date = datetime.now()
+        write_to_excel(work_item_list, file_path, iteration_due_date, append_only)
+
+        append_only = True
 
     print("****** Completed")

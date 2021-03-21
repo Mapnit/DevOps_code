@@ -418,7 +418,7 @@ if __name__ == "__main__":
         })
     elif args.iteration == 'ALL': 
         iteration_list = get_past_iterations(team_context)
-        file_name = 'CNP.GIS_2021_Sprint_Combined.xlsx'
+        file_name = 'CNP.GIS_2021_Sprint_{0}_Combined.xlsx'.format(args.itemType)
     else: 
         iteration_path, iteration_due_date = get_iteration(team_context, args.iteration)
         iteration_list.append({

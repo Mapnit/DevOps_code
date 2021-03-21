@@ -75,7 +75,7 @@ work_item_type_of_interest = ["Product Backlog Item", "Task"]
 pbi_wiql_template = "\
     Select [System.Id] From WorkItems \
     Where [System.AreaPath] = '{AreaPath}' \
-        and [System.WorkItemType] in ('Product Backlog Item') \
+        and [System.WorkItemType] in ('{WorkItemType}') \
         and [System.State] <> 'Removed' \
         and [System.IterationPath] = '{IterationPath}' \
     Order by [Microsoft.VSTS.Common.Priority] asc, [System.CreatedDate] desc \
@@ -183,12 +183,12 @@ def get_past_iterations(team_context):
     return iteration_list
 
 
-def retrieve_work_items(team_context, iteration_path):
+def retrieve_work_items(team_context, iteration_path, work_item_type):
 
     # query the backlogs 
     work_tracking_client = connection.clients.get_work_item_tracking_client()
 
-    wiql_pbi_query = pbi_wiql_template.replace("{AreaPath}", team_context.project).replace("{IterationPath}", iteration_path)
+    wiql_pbi_query = pbi_wiql_template.replace("{AreaPath}", team_context.project).replace("{IterationPath}", iteration_path).replace("{WorkItemType}", work_item_type)
 
     wiql = workItemTrackingModels.Wiql(query=wiql_pbi_query)
 
@@ -259,20 +259,30 @@ def get_lead_duration(team_context, item_id):
                             changed_date, iteration_path, 
                             field_revision[field_name].old_value, field_revision[field_name].new_value))
                         if field_revision[field_name].new_value == 'New' and create_date is None: 
-                            # the first start date
+                            # the first start date of Product Backlog Item
+                            create_date = changed_date
+                            # new work found. reset the finish date 
+                            finish_date = None
+                        elif field_revision[field_name].new_value == 'To Do' and create_date is None: 
+                            # the first start date of Task
                             create_date = changed_date
                             # new work found. reset the finish date 
                             finish_date = None
                         elif field_revision[field_name].new_value == 'Started' and start_date is None: 
-                            # the first start date
+                            # the first start date of Product Backlog Item
+                            start_date = changed_date
+                            # new work found. reset the finish date 
+                            finish_date = None
+                        elif field_revision[field_name].new_value == 'In Progress' and start_date is None: 
+                            # the first start date of Task
                             start_date = changed_date
                             # new work found. reset the finish date 
                             finish_date = None
                         elif field_revision[field_name].new_value == 'Done': 
-                            # the last finish date
+                            # the last finish date of Product Backlog Item or Task
                             finish_date = changed_date
 
-    return (create_date if start_date is None else start_date), finish_date
+    return start_date, finish_date
 
 
 def compose_item_url(team_context, item_id): 
@@ -386,6 +396,9 @@ if __name__ == "__main__":
                         help='ex. CNP.GIS Team')
     parser.add_argument('-i', '--iteration', metavar="<Iteration Path>", 
                         help='ex. CNP.GIS\\Sprint 21.03-A')
+    parser.add_argument('-w', '--itemType', metavar="<Item Type>", default='Product Backlog Item', 
+                        help='ex. Product Backlog Item or Task')
+
 
     args = parser.parse_args()
 
@@ -417,12 +430,12 @@ if __name__ == "__main__":
         iteration_path = i['iteration_path']
         iteration_due_date = i['iteration_due_date']
 
-        print("****** Retrieving work items for {0} ....".format(iteration_path))
-        work_item_list = retrieve_work_items(team_context, iteration_path)
+        print("****** Retrieving work items of {0} for {1} ....".format(iteration_path, args.itemType))
+        work_item_list = retrieve_work_items(team_context, iteration_path, args.itemType)
 
         local_folder = os.getcwd()
         if file_name is None: 
-            file_name = iteration_path.replace('\\', '_') + ".xlsx"
+            file_name = iteration_path.replace('\\', '_') + "_{0}.xlsx".format(args.itemType)
         file_path = os.path.join(os.path.join(local_folder, r"iterations"), file_name)
 
         if append_only == False and os.path.exists(file_path):

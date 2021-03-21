@@ -282,7 +282,7 @@ def get_lead_duration(team_context, item_id):
                             # the last finish date of Product Backlog Item or Task
                             finish_date = changed_date
 
-    return start_date, finish_date
+    return (create_date if start_date is None else start_date), finish_date
 
 
 def compose_item_url(team_context, item_id): 

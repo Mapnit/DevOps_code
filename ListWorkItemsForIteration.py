@@ -17,7 +17,6 @@ personal_access_token = 'PAT'
 # DevOps Organization URL
 organization_url = 'https://dev.azure.com/YOUR-ORG'
 
-
 usa_cst = pytz.timezone('US/Central')
 today_timezone = usa_cst.localize(datetime.now())
 
@@ -75,11 +74,11 @@ work_item_type_of_interest = ["Product Backlog Item", "Task"]
 
 pbi_wiql_template = "\
     Select [System.Id] From WorkItems \
-    Where [System.AreaPath] = 'CNP.GIS' \
+    Where [System.AreaPath] = '{AreaPath}' \
         and [System.WorkItemType] in ('Product Backlog Item') \
         and [System.State] <> 'Removed' \
         and [System.IterationPath] = '{IterationPath}' \
-    Order by [Microsoft.VSTS.Common.Priority] asc, [System.CreatedDate] desc\
+    Order by [Microsoft.VSTS.Common.Priority] asc, [System.CreatedDate] desc \
 "
 
 field_names = ['System.Id', 'System.WorkItemType', 'System.Parent', 
@@ -189,7 +188,9 @@ def retrieve_work_items(team_context, iteration_path):
     # query the backlogs 
     work_tracking_client = connection.clients.get_work_item_tracking_client()
 
-    wiql = workItemTrackingModels.Wiql(query= pbi_wiql_template.replace("{IterationPath}", iteration_path))
+    wiql_pbi_query = pbi_wiql_template.replace("{AreaPath}", team_context.project).replace("{IterationPath}", iteration_path)
+
+    wiql = workItemTrackingModels.Wiql(query=wiql_pbi_query)
 
     query_by_wiql_response = work_tracking_client.query_by_wiql(wiql, team_context)
 
@@ -220,25 +221,6 @@ def retrieve_work_items(team_context, iteration_path):
                     # save to the return variable
                     work_item_list.append(work_item)
 
-                    if "System.Parent" in work_item.fields.keys():
-                        parent_id = work_item.fields["System.Parent"]
-                        if parent_id is not None and parent_id not in idList and parent_id not in parentIdList: 
-                            # found a parent not in this iteration. now go get it
-                            get_work_item_response = work_tracking_client.get_work_item(
-                                parent_id, fields = field_names)
-                            if get_work_item_response is not None: 
-                                parent_work_item = get_work_item_response
-                                if parent_work_item.fields["System.WorkItemType"] in work_item_type_of_interest:
-                                    # output to the screen
-                                    print("{0}, {1}: {2}".format(
-                                        parent_work_item.fields["System.WorkItemType"], 
-                                        parent_work_item.fields["System.Title"], 
-                                        parent_work_item.fields["System.State"])) 
-                                    # save to the return variable
-                                    work_item_list.append(parent_work_item)
-                                    parentIdList.append(parent_id)
-                                    index += 1
-
             i, j = j, min(j + 200, len(idList))
 
         # All query results have been retrieved
@@ -248,6 +230,49 @@ def retrieve_work_items(team_context, iteration_path):
 
         # return all work items
         return work_item_list
+
+
+def get_lead_duration(team_context, item_id): 
+    # query the revision 
+    work_tracking_client = connection.clients.get_work_item_tracking_client()
+
+    get_updates_response =  work_tracking_client.get_updates(item_id, project=team_context.project)
+
+    create_date = None
+    start_date = None
+    finish_date = None
+    if get_updates_response is not None:
+        for revision in get_updates_response: 
+            if revision.fields is None:
+                # skip any non-field update
+                continue
+            else: 
+                field_revision = revision.fields
+                fields_of_interest = ['System.State']
+                for field_name in fields_of_interest:
+                    if field_name in field_revision.keys(): 
+                        iteration_path = None
+                        if 'System.IterationPath' in field_revision.keys(): 
+                            iteration_path = field_revision['System.IterationPath'].new_value
+                        changed_date = field_revision['System.ChangedDate'].new_value
+                        print("{0} - {1} [{2}, {3}]: {4} -> {5}".format(item_id, field_name, 
+                            changed_date, iteration_path, 
+                            field_revision[field_name].old_value, field_revision[field_name].new_value))
+                        if field_revision[field_name].new_value == 'New' and create_date is None: 
+                            # the first start date
+                            create_date = changed_date
+                            # new work found. reset the finish date 
+                            finish_date = None
+                        elif field_revision[field_name].new_value == 'Started' and start_date is None: 
+                            # the first start date
+                            start_date = changed_date
+                            # new work found. reset the finish date 
+                            finish_date = None
+                        elif field_revision[field_name].new_value == 'Done': 
+                            # the last finish date
+                            finish_date = changed_date
+
+    return (create_date if start_date is None else start_date), finish_date
 
 
 def compose_item_url(team_context, item_id): 
@@ -289,9 +314,11 @@ def write_to_workbook(work_item_list, worksheet, iteration_due_date, append_only
     for i in range(len(work_item_list)): 
         work_item = work_item_list[i]
         r = i + start_row
+        start_date = None
+        finish_date = None
         for f in range(len(export_field_names)):
             field_name = export_field_names[f] 
-            field_value = ''
+            field_value = None
             if field_name == 'Export.Timestamp':
                 ws.cell(row=r, column=export_field_export_timestamp_index, value=export_timestamp)
             elif field_name in work_item.fields.keys():
@@ -301,7 +328,8 @@ def write_to_workbook(work_item_list, worksheet, iteration_due_date, append_only
                 # further process the cell value
                 if field_name == 'System.Id': 
                     ws.cell(row=r, column=export_field_excel_itemUrl_index, value=compose_item_url(team_context, field_value))
-                if field_name == 'System.Tags': 
+                    start_date, finish_date = get_lead_duration(team_context, field_value)
+                elif field_name == 'System.Tags': 
                     field_value = field_value.upper()
                     # parse the tags for operation
                     if field_value.find('ELECTRIC') > -1: 
@@ -318,9 +346,15 @@ def write_to_workbook(work_item_list, worksheet, iteration_due_date, append_only
                         ws.cell(row=r, column=export_field_excel_planned_index, value='Unplanned')
                     else: 
                         ws.cell(row=r, column=export_field_excel_planned_index, value='Planned')
-                if field_name == 'System.AssignedTo': 
+                elif field_name == 'System.AssignedTo': 
                     # simplify the AssignedTo object 
                     field_value = work_item.fields["System.AssignedTo"]['displayName']
+                elif field_name in ['System.CreatedDate']: 
+                    # set the start working date
+                    field_value = start_date
+                elif field_name in ['System.ChangedDate']:
+                    # set the finish working date
+                    field_value = finish_date
                 ws.cell(row=r, column=fc+1, value=field_value)
 
     return ws

@@ -13,9 +13,9 @@ from openpyxl import Workbook
 from openpyxl import load_workbook
 
 # DevOps personal access token (recycle every 30 days) 
-personal_access_token = 'PAT'
+personal_access_token = 'urlycbelh7lf4bc6w3c3a4jd2xur3uwobfpahbswyzekcy2mucaq'
 # DevOps Organization URL
-organization_url = 'https://dev.azure.com/YOUR-ORG'
+organization_url = 'https://dev.azure.com/CenterPoint-GIS'
 
 usa_cst = pytz.timezone('US/Central')
 today_timezone = usa_cst.localize(datetime.now())
@@ -75,24 +75,40 @@ work_item_type_of_interest = ["Product Backlog Item", "Task"]
 pbi_wiql_template = "\
     Select [System.Id] From WorkItems \
     Where [System.AreaPath] = '{AreaPath}' \
-        and [System.WorkItemType] in ('{WorkItemType}') \
+        and [System.WorkItemType] in ('Product Backlog Item') \
         and [System.State] <> 'Removed' \
         and [System.IterationPath] = '{IterationPath}' \
     Order by [Microsoft.VSTS.Common.Priority] asc, [System.CreatedDate] desc \
 "
 
-field_names = ['System.Id', 'System.WorkItemType', 'System.Parent', 
+task_wiql_template = "\
+    Select [System.Id] From WorkItems \
+    Where [System.AreaPath] = '{AreaPath}' \
+        and [System.WorkItemType] in ('Task') \
+        and [System.State] <> 'Removed' \
+        and [System.IterationPath] = '{IterationPath}' \
+    Order by [Microsoft.VSTS.Common.Priority] asc, [System.CreatedDate] desc \
+"
+
+pbi_field_names = ['System.Id', 'System.WorkItemType', 'System.Parent', 
     'System.Title', 'System.Tags', # 'System.Description',
     'Microsoft.VSTS.Common.ValueArea', 'Microsoft.VSTS.Common.BusinessValue', 
     'System.AssignedTo', 'System.State', 'System.CreatedDate', 'System.ChangedDate',
     'System.AreaPath', 'System.IterationPath']
+
+# two weeks long 
+DAYS_PER_ITERATION = 10 
+
+capacity_field_names = ['team_member', 'capacity_per_day', 
+    'days_per_iteration', 'IterationPath']
 
 
 def get_current_iteration(team_context): 
 
     work_client = connection.clients.get_work_client()
 
-    current_iteration = None
+    iteration_id = None
+    iteration_path = None
     iteration_due_date = None
 
     # get the iteration paths
@@ -105,7 +121,8 @@ def get_current_iteration(team_context):
                 # skip the iterations of last year and the future
                 None
             else: 
-                current_iteration = team_iteration.path
+                iteration_path = team_iteration.path
+                iteration_id = team_iteration.id
                 iteration_due_date = team_iteration.attributes.finish_date 
                 print("Iteration [{0}]: {1}, {2} ({3} -> {4})".format(
                     index, team_iteration.name, team_iteration.path, 
@@ -116,13 +133,14 @@ def get_current_iteration(team_context):
         # All team iterations have been retrieved
         get_team_iterations_response = None
 
-    return current_iteration, iteration_due_date
+    return iteration_id, current_iteration, iteration_due_date
 
 
 def get_iteration(team_context, iteration_path): 
 
     work_client = connection.clients.get_work_client()
 
+    iteration_id = None
     iteration_due_date = None
 
     # get the iteration paths
@@ -135,7 +153,7 @@ def get_iteration(team_context, iteration_path):
                 # skip the iterations of last year and the future
                 continue
             elif iteration_path == team_iteration.path:
-                current_iteration = team_iteration.path
+                iteration_id = team_iteration.id
                 iteration_due_date = team_iteration.attributes.finish_date 
                 print("Iteration [{0}]: {1}, {2} ({3} -> {4})".format(
                     index, team_iteration.name, team_iteration.path, 
@@ -146,7 +164,7 @@ def get_iteration(team_context, iteration_path):
         # All team iterations have been retrieved
         get_team_iterations_response = None
 
-    return iteration_path, iteration_due_date
+    return iteration_id, iteration_due_date
 
 
 def get_past_iterations(team_context): 
@@ -166,6 +184,7 @@ def get_past_iterations(team_context):
                 continue
             else:
                 iteration_path = team_iteration.path
+                iteration_id = team_iteration.id
                 iteration_due_date = team_iteration.attributes.finish_date                 
                 print("Iteration [{0}]: {1}, {2} ({3} -> {4})".format(
                     index, team_iteration.name, team_iteration.path, 
@@ -173,6 +192,7 @@ def get_past_iterations(team_context):
                     team_iteration.attributes.finish_date.strftime("%Y-%m-%d")
                     ))
                 iteration_list.append({
+                    'iteration_id': iteration_id, 
                     'iteration_path': iteration_path, 
                     'iteration_due_date': iteration_due_date
                 })
@@ -183,14 +203,12 @@ def get_past_iterations(team_context):
     return iteration_list
 
 
-def retrieve_work_items(team_context, iteration_path, work_item_type):
+def _retrieve_work_items(team_context, wiql_query):
 
     # query the backlogs 
     work_tracking_client = connection.clients.get_work_item_tracking_client()
 
-    wiql_pbi_query = pbi_wiql_template.replace("{AreaPath}", team_context.project).replace("{IterationPath}", iteration_path).replace("{WorkItemType}", work_item_type)
-
-    wiql = workItemTrackingModels.Wiql(query=wiql_pbi_query)
+    wiql = workItemTrackingModels.Wiql(query=wiql_query)
 
     query_by_wiql_response = work_tracking_client.query_by_wiql(wiql, team_context)
 
@@ -210,7 +228,7 @@ def retrieve_work_items(team_context, iteration_path, work_item_type):
         while i < len(idList):    
             # get work items in a batch 
             get_work_items_response = work_tracking_client.get_work_items(
-                idList[i:j], fields = field_names)
+                idList[i:j], fields = pbi_field_names)
             if get_work_items_response is not None: 
                 for work_item in get_work_items_response: 
                     # output to the screen
@@ -230,6 +248,25 @@ def retrieve_work_items(team_context, iteration_path, work_item_type):
 
         # return all work items
         return work_item_list
+
+
+def retrieve_PBIs(team_context, iteration_path):
+
+    wiql_pbi_query = pbi_wiql_template.replace( \
+        "{AreaPath}", team_context.project).replace( \
+        "{IterationPath}", iteration_path)
+
+    return _retrieve_work_items(team_context, wiql_pbi_query)
+
+
+def retrieve_tasks(team_context, iteration_path): 
+
+    wiql_task_query = task_wiql_template.replace( \
+        "{AreaPath}", team_context.project).replace( \
+        "{IterationPath}", iteration_path)
+        #"{ParentId}", str(pbi_id)) # System.Parent not applicable in filter 
+
+    return _retrieve_work_items(team_context, wiql_task_query)
 
 
 def get_lead_duration(team_context, item_id): 
@@ -290,11 +327,11 @@ def compose_item_url(team_context, item_id):
     return item_url_template.replace("{ORG_URL}", organization_url).replace("{PROJECT}", team_context.project).replace("{TEAM}", team_context.team).replace("{ID}", str(item_id))
 
 
-def write_to_workbook(work_item_list, worksheet, iteration_due_date, append_only): 
+def write_pbi_to_workbook(work_item_list, worksheet, iteration_due_date, append_only): 
     # prepare the excel file 
     ws = worksheet
 
-    export_field_names = copy.deepcopy(field_names)
+    export_field_names = copy.deepcopy(pbi_field_names)
     export_field_names.append('Excel.Operation') 
     export_field_excel_operation_index = len(export_field_names)
     export_field_names.append('Excel.Region')
@@ -370,7 +407,7 @@ def write_to_workbook(work_item_list, worksheet, iteration_due_date, append_only
     return ws
 
 
-def write_to_excel(work_item_list, file_path, iteration_due_date, append_only=False):
+def write_pbi_to_excel(work_item_list, file_path, sheet_name, iteration_due_date, append_only=False):
     ws = None
     if append_only == True:
         # load the excel file
@@ -380,9 +417,90 @@ def write_to_excel(work_item_list, file_path, iteration_due_date, append_only=Fa
         wb = Workbook()
     # get the active sheet
     ws = wb.active
-    ws.title = "current_iteration"
+    ws.title = sheet_name
 
-    write_to_workbook(work_item_list, ws, iteration_due_date, append_only)
+    write_pbi_to_workbook(work_item_list, ws, iteration_due_date, append_only)
+
+    # save to a given file
+    wb.save(file_path)    
+
+
+def get_capacities(team_context, iteration_id, iteration_path): 
+    # get capacties for each developer
+    work_client = connection.clients.get_work_client()
+
+    capacity_list = []
+
+    get_capacities_response = work_client.get_capacities_with_identity_ref(team_context, iteration_id)
+    if get_capacities_response is not None: 
+        for dev_capacity in get_capacities_response: 
+            team_member = dev_capacity.team_member.display_name
+            capacity_per_day = 0
+            for dev_activity in dev_capacity.activities: 
+                capacity_per_day += dev_activity.capacity_per_day
+            capacity_list.append({
+                'team_member': team_member, 
+                'IterationPath': iteration_path, 
+                'days_per_iteration': DAYS_PER_ITERATION, 
+                'capacity_per_day': capacity_per_day
+            })
+    return capacity_list
+
+
+def write_capacity_to_workbook(capacity_list, worksheet, iteration_due_date, append_only): 
+    # prepare the excel file 
+    ws = worksheet
+
+    export_field_names = copy.deepcopy(capacity_field_names)
+
+    export_field_names.append('Export.Timestamp') # Export.DueDate
+    export_field_export_timestamp_index = len(export_field_names)
+    if isinstance(iteration_due_date, datetime): 
+        export_timestamp = iteration_due_date.strftime("%Y-%m-%d")
+
+    start_row = 0
+    if append_only == False:
+        # write the headers to the workbook
+        for f in range(len(export_field_names)): 
+            simple_name = export_field_names[f].split('.')[-1]
+            ws.cell(row=1, column=f+1, value=simple_name)
+        start_row = 2
+    else:
+        start_row = ws.max_row + 1
+
+    # write data to the workbook 
+    for i in range(len(capacity_list)): 
+        dev_capacity = capacity_list[i]
+        r = i + start_row
+        start_date = None
+        finish_date = None
+        for f in range(len(export_field_names)):
+            field_name = export_field_names[f] 
+            field_value = None
+            if field_name == 'Export.Timestamp':
+                ws.cell(row=r, column=export_field_export_timestamp_index, value=export_timestamp)
+            elif field_name in dev_capacity.keys():
+                fc = export_field_names.index(field_name)
+                # set the cell value
+                field_value = dev_capacity[field_name]
+                ws.cell(row=r, column=fc+1, value=field_value)
+
+    return ws
+
+
+def write_capacity_to_excel(capacity_list, file_path, sheet_name, iteration_due_date, append_only=False):
+    ws = None
+    if append_only == True:
+        # load the excel file
+        wb = load_workbook(file_path)
+    else: 
+        # prepare the excel file 
+        wb = Workbook()
+    # get the active sheet
+    ws = wb.active
+    ws.title = sheet_name
+
+    write_capacity_to_workbook(capacity_list, ws, iteration_due_date, append_only)
 
     # save to a given file
     wb.save(file_path)    
@@ -396,47 +514,53 @@ if __name__ == "__main__":
                         help='ex. CNP.GIS Team')
     parser.add_argument('-i', '--iteration', metavar="<Iteration Path>", 
                         help='ex. CNP.GIS\\Sprint 21.03-A')
-    parser.add_argument('-w', '--itemType', metavar="<Item Type>", default='Product Backlog Item', 
-                        help='ex. Product Backlog Item or Task')
-
 
     args = parser.parse_args()
 
     # set the team context 
     team_context = workModels.TeamContext(project=args.project, team=args.team)
 
+    iteration_id = None
+    iteration_path = None
     iteration_list = []
-    file_name = None
+
+    pbi_file_name = None
+    capacity_file_name = None
     append_only = False
 
     if args.iteration is None: 
         print("****** Getting the current iteration ...")
-        iteration_path, iteration_due_date = get_current_iteration(team_context)
+        iteration_id, iteration_path, iteration_due_date = get_current_iteration(team_context)
         iteration_list.append({
+            'iteration_id': iteration_id, 
             'iteration_path': iteration_path, 
             'iteration_due_date': iteration_due_date
         })
     elif args.iteration == 'ALL': 
         iteration_list = get_past_iterations(team_context)
-        file_name = 'CNP.GIS_2021_Sprint_{0}_Combined.xlsx'.format(args.itemType)
+        pbi_file_name = 'CNP.GIS_2021_Sprint_{0}_Combined.xlsx'.format('PBI')
+        capacity_file_name = 'CNP.GIS_2021_Sprint_{0}_Combined.xlsx'.format('Capacity')
     else: 
-        iteration_path, iteration_due_date = get_iteration(team_context, args.iteration)
+        iteration_path = args.iteration
+        iteration_id, iteration_due_date = get_iteration(team_context, iteration_path)
         iteration_list.append({
+            'iteration_id': iteration_id, 
             'iteration_path': iteration_path, 
             'iteration_due_date': iteration_due_date
         })
 
     for i in iteration_list: 
+        iteration_id = i['iteration_id']
         iteration_path = i['iteration_path']
         iteration_due_date = i['iteration_due_date']
 
-        print("****** Retrieving work items of {0} for {1} ....".format(iteration_path, args.itemType))
-        work_item_list = retrieve_work_items(team_context, iteration_path, args.itemType)
+        print("****** Retrieving PBIs for {0} ....".format(iteration_path))
+        work_item_list = retrieve_PBIs(team_context, iteration_path)
 
         local_folder = os.getcwd()
-        if file_name is None: 
-            file_name = iteration_path.replace('\\', '_') + "_{0}.xlsx".format(args.itemType)
-        file_path = os.path.join(os.path.join(local_folder, r"iterations"), file_name)
+        if pbi_file_name is None: 
+            pbi_file_name = iteration_path.replace('\\', '_') + "_PBI.xlsx"
+        file_path = os.path.join(os.path.join(local_folder, r"iterations"), pbi_file_name)
 
         if append_only == False and os.path.exists(file_path):
             raise Exception("File ({0}) already exists.".format(file_path))
@@ -444,7 +568,24 @@ if __name__ == "__main__":
         print("****** Storing work items to an Excel file {0} ....".format(file_path)) 
         if iteration_due_date is None:
             iteration_due_date = datetime.now()
-        write_to_excel(work_item_list, file_path, iteration_due_date, append_only)
+
+        write_pbi_to_excel(work_item_list, file_path, "current_iteration", iteration_due_date, append_only)
+
+        print("****** Retrieving Capacities for {0} ....".format(iteration_path))
+        capacity_list = get_capacities(team_context, iteration_id, iteration_path)
+
+        if capacity_file_name is None: 
+            capacity_file_name = iteration_path.replace('\\', '_') + "_Capacity.xlsx"
+        file_path = os.path.join(os.path.join(local_folder, r"iterations"), capacity_file_name)
+
+        if append_only == False and os.path.exists(file_path):
+            raise Exception("File ({0}) already exists.".format(file_path))
+
+        print("****** Storing capacities to an Excel file {0} ....".format(file_path)) 
+        if iteration_due_date is None:
+            iteration_due_date = datetime.now()
+
+        write_capacity_to_excel(capacity_list, file_path, "capacity", iteration_due_date, append_only)
 
         append_only = True
 
